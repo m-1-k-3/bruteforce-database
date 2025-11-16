@@ -1,0 +1,148 @@
+name: Quality Assurance
+
+on:
+  push:
+    branches: [ main, master, 'claude/**' ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  validate:
+    name: Validate Wordlists
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Run validation suite
+      run: |
+        echo "🔍 Running wordlist validation..."
+        python3 scripts/validate.py
+
+    - name: Check for encoding issues
+      run: |
+        echo "📝 Checking file encodings..."
+        if file *.txt *.lst 2>/dev/null | grep -v "UTF-8\|ASCII"; then
+          echo "⚠️  Warning: Non-UTF-8 files detected"
+        else
+          echo "✓ All files are UTF-8 or ASCII"
+        fi
+
+    - name: Generate statistics
+      run: |
+        echo "📊 Generating statistics..."
+        echo "Total wordlist files: $(find . -type f \( -name "*.txt" -o -name "*.lst" \) ! -path "./.git/*" | wc -l)"
+        echo "Total size: $(du -sh . | cut -f1)"
+        echo "Total lines: $(find . -type f \( -name "*.txt" -o -name "*.lst" \) ! -path "./.git/*" -exec wc -l {} + | tail -1 | awk '{print $1}')"
+
+    - name: Upload manifest
+      uses: actions/upload-artifact@v4
+      with:
+        name: wordlist-manifest
+        path: manifest.json
+        retention-days: 30
+
+    - name: Validate manifest
+      run: |
+        if [ -f manifest.json ]; then
+          echo "✓ Manifest generated successfully"
+          cat manifest.json | python3 -m json.tool > /dev/null
+          echo "✓ Manifest is valid JSON"
+        else
+          echo "✗ Manifest generation failed"
+          exit 1
+        fi
+
+  security:
+    name: Security Checks
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Check for sensitive data
+      run: |
+        echo "🔒 Scanning for potential sensitive data patterns..."
+
+        # Check for API keys, tokens, etc.
+        if grep -r -i -E "(api[_-]?key|secret[_-]?key|password|token|bearer)" *.txt *.lst 2>/dev/null | grep -v "password" | head -5; then
+          echo "⚠️  Warning: Potential sensitive data patterns found"
+          echo "⚠️  Please review carefully"
+        else
+          echo "✓ No obvious sensitive data patterns detected"
+        fi
+
+    - name: Verify file sizes
+      run: |
+        echo "📏 Checking for unexpectedly large files..."
+        find . -type f \( -name "*.txt" -o -name "*.lst" \) ! -path "./.git/*" -size +100M -exec ls -lh {} \; | while read line; do
+          echo "⚠️  Large file detected: $line"
+        done || echo "✓ All files within reasonable size limits"
+
+  integrity:
+    name: Integrity Verification
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Verify file integrity
+      run: |
+        echo "🔐 Verifying file integrity..."
+        python3 << 'PYTHON_SCRIPT'
+        import os
+        import sys
+        from pathlib import Path
+
+        corrupted = []
+        checked = 0
+
+        for ext in ['*.txt', '*.lst']:
+            for filepath in Path('.').rglob(ext):
+                if '.git' in filepath.parts:
+                    continue
+
+                checked += 1
+                try:
+                    with open(filepath, 'rb') as f:
+                        content = f.read()
+                        # Check for null bytes (binary corruption)
+                        if b'\x00' in content:
+                            corrupted.append(str(filepath))
+                except Exception as e:
+                    print(f"⚠️  Error reading {filepath}: {e}")
+                    corrupted.append(str(filepath))
+
+        print(f"Checked {checked} files")
+
+        if corrupted:
+            print(f"✗ Corrupted files detected ({len(corrupted)}):")
+            for f in corrupted[:10]:
+                print(f"  - {f}")
+            sys.exit(1)
+        else:
+            print("✓ No corrupted files detected")
+        PYTHON_SCRIPT
+
+    - name: Check line endings
+      run: |
+        echo "📄 Checking line endings consistency..."
+        if find . -type f \( -name "*.txt" -o -name "*.lst" \) ! -path "./.git/*" -exec file {} \; | grep -i "CRLF" | head -5; then
+          echo "⚠️  Warning: Windows line endings (CRLF) detected"
+          echo "⚠️  Consider normalizing to Unix (LF) for consistency"
+        else
+          echo "✓ Line endings are consistent"
+        fi
